@@ -1,3 +1,4 @@
+import functools
 import os
 import shutil
 import subprocess
@@ -30,6 +31,7 @@ from ch_tools.common.clickhouse.client import OutputFormat
 from ch_tools.common.clickhouse.config import get_clickhouse_config
 from ch_tools.common.clickhouse.config.storage_configuration import S3DiskConfiguration
 from ch_tools.common.process_pool import WorkerTask, execute_tasks_in_parallel
+from ch_tools.common.utils import retry_fn
 
 ATTACH_DETTACH_TIMEOUT = 5000
 ATTACH_DETACH_QUERY_RETRY = 10
@@ -514,36 +516,19 @@ def print_partitions(ctx: Context, repaired_partitions: Set[TablePartition]) -> 
     print_response(ctx, result, default_format="table")
 
 
-def query_with_retry(ctx: Context, query: str, timeout: int, retries: int) -> bool:
-    """
-    Execute clickhouse query with given number of retries.
-    """
-    logging.debug("Execute query: {}", query)
-    for retry in range(retries):
-        try:
-            res = execute_query(ctx, query, timeout=timeout)
-            if res == "":
-                break
-        except Exception as e:
-            if retry + 1 == retries:
-                logging.warning("Query {} failed  with:  {!r}\n", query, e)
-                return False
-            continue
-
-    logging.info("Query {} finished successfully", query)
-    return True
-
-
 def detach_partition(ctx: Context, table_partition: TablePartition) -> bool:
     """
     Run DETACH the partition.
     """
 
     detach_query = f"ALTER TABLE {table_partition.table} DETACH PARTITION '{table_partition.partition}'"
-    return query_with_retry(
-        ctx,
-        detach_query,
-        timeout=ATTACH_DETTACH_TIMEOUT,
+    return retry_fn(
+        functools.partial(
+            execute_query,
+            ctx,
+            detach_query,
+            timeout=ATTACH_DETTACH_TIMEOUT,
+        ),
         retries=ATTACH_DETACH_QUERY_RETRY,
     )
 
@@ -552,12 +537,14 @@ def attach_partition(ctx: Context, table_partition: TablePartition) -> bool:
     """
     Run ATTACH the partition.
     """
-
     attach_query = f"ALTER TABLE {table_partition.table} ATTACH PARTITION '{table_partition.partition}'"
     # To avoid keeping detached partitions, perform the attach query with double attempts.
-    return query_with_retry(
-        ctx,
-        attach_query,
-        timeout=ATTACH_DETTACH_TIMEOUT,
+    return retry_fn(
+        functools.partial(
+            execute_query,
+            ctx,
+            attach_query,
+            timeout=ATTACH_DETTACH_TIMEOUT,
+        ),
         retries=2 * ATTACH_DETACH_QUERY_RETRY,
     )
