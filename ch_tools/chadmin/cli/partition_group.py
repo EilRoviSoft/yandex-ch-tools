@@ -1,4 +1,5 @@
 # pylint: disable=too-many-lines
+import functools
 import json
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
@@ -22,6 +23,7 @@ from ch_tools.common import logging
 from ch_tools.common.cli.formatting import print_response
 from ch_tools.common.cli.parameters import BytesParamType
 from ch_tools.common.process_pool import WorkerTask, execute_tasks_in_parallel
+from ch_tools.common.utils import retry_fn
 
 
 @group("partition", cls=Chadmin)
@@ -197,6 +199,9 @@ def list_partitions_command(ctx: Context, **kwargs: Any) -> None:
     default=False,
     help="Enable dry run mode and do not perform any modifying actions.",
 )
+@option(
+    "-r", "--retries", "retries", default=3, help="Amount of retries before failing"
+)
 @pass_context
 def attach_partitions_command(
     ctx: Context,
@@ -206,6 +211,7 @@ def attach_partitions_command(
     partition_id: Optional[str],
     keep_going: bool,
     dry_run: bool,
+    retries: int,
     **kwargs: Any,
 ) -> None:
     """Attach one or several partitions."""
@@ -221,13 +227,23 @@ def attach_partitions_command(
     )["data"]
     for p in partitions:
         try:
-            attach_partition(
-                ctx,
-                database=p["database"],
-                table=p["table"],
-                partition_id=p["partition_id"],
-                dry_run=dry_run,
+            ok = retry_fn(
+                functools.partial(
+                    attach_partition,
+                    ctx,
+                    database=p["database"],
+                    table=p["table"],
+                    partition_id=p["partition_id"],
+                    dry_run=dry_run,
+                ),
+                retries=retries,
             )
+
+            if not ok:
+                raise RuntimeError(
+                    f"Failed to attach partition '{p['partition_id']}' "
+                    f"in '{p['database']}.{p['table']}' after {retries} retries."
+                )
         except Exception as e:
             if keep_going:
                 logging.warning("{!r}\n", e)
@@ -333,6 +349,9 @@ def attach_partitions_command(
     default=False,
     help="Enable dry run mode and do not perform any modifying actions.",
 )
+@option(
+    "-r", "--retries", "retries", default=3, help="Amount of retries before failing"
+)
 @pass_context
 def detach_partitions_command(
     ctx: Context,
@@ -349,6 +368,7 @@ def detach_partitions_command(
     replication_task_type_pattern: Optional[str],
     keep_going: bool,
     dry_run: bool,
+    retries: int,
     use_partition_list_from_json: Optional[str],
 ) -> None:
     """Detach one or several partitions."""
@@ -369,13 +389,23 @@ def detach_partitions_command(
     )["data"]
     for p in partitions:
         try:
-            detach_partition(
-                ctx,
-                database=p["database"],
-                table=p["table"],
-                partition_id=p["partition_id"],
-                dry_run=dry_run,
+            ok = retry_fn(
+                functools.partial(
+                    detach_partition,
+                    ctx,
+                    database=p["database"],
+                    table=p["table"],
+                    partition_id=p["partition_id"],
+                    dry_run=dry_run,
+                ),
+                retries=retries,
             )
+
+            if not ok:
+                raise RuntimeError(
+                    f"Failed to attach partition '{p['partition_id']}' "
+                    f"in '{p['database']}.{p['table']}' after {retries} retries."
+                )
         except Exception as e:
             if keep_going:
                 logging.warning("{!r}\n", e)
@@ -495,6 +525,9 @@ def detach_partitions_command(
     default=False,
     help="Enable dry run mode and do not perform any modifying actions.",
 )
+@option(
+    "-r", "--retries", "retries", default=3, help="Amount of retries before failing"
+)
 @pass_context
 def reattach_partitions_command(
     ctx: Context,
@@ -515,6 +548,7 @@ def reattach_partitions_command(
     keep_going: bool,
     limit_errors: int,
     dry_run: bool,
+    retries: int,
     use_partition_list_from_json: Optional[str],
 ) -> None:
     """Perform sequential attach and detach of one or several partitions."""
@@ -551,12 +585,39 @@ def reattach_partitions_command(
     failed_partitions = []
     for p in partitions:
         try:
-            detach_partition(
-                ctx, p["database"], p["table"], p["partition_id"], dry_run=dry_run
+            detach_ok = retry_fn(
+                functools.partial(
+                    detach_partition,
+                    ctx,
+                    database=p["database"],
+                    table=p["table"],
+                    partition_id=p["partition_id"],
+                    dry_run=dry_run,
+                ),
+                retries=retries,
             )
-            attach_partition(
-                ctx, p["database"], p["table"], p["partition_id"], dry_run=dry_run
+            if not detach_ok:
+                raise RuntimeError(
+                    f"Failed to detach partition '{p['partition_id']}' "
+                    f"in '{p['database']}.{p['table']}' after {retries} retries."
+                )
+
+            attach_ok = retry_fn(
+                functools.partial(
+                    attach_partition,
+                    ctx,
+                    database=p["database"],
+                    table=p["table"],
+                    partition_id=p["partition_id"],
+                    dry_run=dry_run,
+                ),
+                retries=2 * retries,
             )
+            if not attach_ok:
+                raise RuntimeError(
+                    f"Failed to attach partition '{p['partition_id']}' "
+                    f"in '{p['database']}.{p['table']}' after {2 * retries} retries."
+                )
         except Exception:
             error_count += 1
             failed_partitions.append(p)

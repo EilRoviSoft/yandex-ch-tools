@@ -1,10 +1,13 @@
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Callable, Dict, List, Union
 
 from click import Context
+
+from ch_tools.common import logging
 
 
 def version_ge(version1: str, version2: str) -> bool:
@@ -189,3 +192,50 @@ def update_by_key_path(object_: dict[str, Any], key_path: str, value: Any) -> No
                 _update(obj[key], path, value, current_path_str)
 
     _update(object_, key_path.split("."), value, "")
+
+
+DEFAULT_RETRY_COUNT = 3
+DEFAULT_RETRY_SLEEP = 0
+DEFAULT_RETRY_TIMEOUT = 300
+
+
+def retry_fn(
+    fn: Callable,
+    retries: int = DEFAULT_RETRY_COUNT,
+    sleep: int = DEFAULT_RETRY_SLEEP,
+    timeout: int = DEFAULT_RETRY_TIMEOUT,
+    *args: Any,
+    **kwargs: Any,
+) -> bool:
+    for attempt in range(retries):
+        try:
+            res = fn(*args, **kwargs)
+            if res == "":
+                break
+        except Exception as e:
+            if attempt + 1 == retries:
+                logging.warning(
+                    "Fn '{}' failed after {} attempts with: {!r}",
+                    fn.__name__ if hasattr(fn, "__name__") else repr(fn),
+                    retries,
+                    e,
+                )
+                return False
+            logging.debug(
+                "Fn '{}' failed on attempt {}/{} with: {!r}, retrying in {}s...",
+                fn.__name__ if hasattr(fn, "__name__") else repr(fn),
+                attempt + 1,
+                retries,
+                e,
+                sleep,
+            )
+            if sleep != 0:
+                time.sleep(sleep)
+            continue
+
+    logging.info(
+        "Fn '{}' finished successfully",
+        fn.__name__ if hasattr(fn, "__name__") else repr(fn),
+    )
+
+    return True
